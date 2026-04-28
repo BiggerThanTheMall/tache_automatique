@@ -1,0 +1,124 @@
+// ==UserScript==
+// @name         Modulr - Automatisation Post-Rechargement
+// @namespace    http://tampermonkey.net/
+// @version      10.0.0
+// @description  Crée une tache automatique au changement d'états de devis.
+// @author       le G
+// @match        https://courtage.modulr.fr/*
+// @grant        none
+// @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/raw/main/creation_tache_automatique_changement_etat_devis.user.js
+// @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/raw/main/creation_tache_automatique_changement_etat_devis.user.js
+// ==/UserScript==
+
+
+(function() {
+    'use strict';
+
+    const CONFIG_ETATS = {
+        'pending_parts': { titre: "DEMANDE DE PIÈCES", note: "Relancer le client pour obtenir les éléments manquants et pouvoir éditer le devis.", delai: 1 },
+        'pricing': { titre: "DEVIS À FAIRE", note: "Réaliser la tarification et envoyer le devis sous 48h.", delai: 0 },
+        'delivered': { titre: "RELANCE DEVIS ENVOYÉ", note: "À relancer pour validation.", delai: 2 },
+        'pending_approval': { titre: "SUIVI MISE EN PLACE", note: "En attente de validation. Suivre la mise en place du contrat.", delai: 1 }
+    };
+
+    function getActiveUserId() {
+        const userMapping = { 'dkalah': '33', 'ekalah': '23', 'gkalah': '24', 'jcasimir': '28', 'lvulliod': '36', 'nkalah': '22', 'skrief': '2', 'youachbab': '39' };
+        const cookieMatch = document.cookie.split('; ').find(row => row.startsWith('modulr_user='));
+        const userName = cookieMatch ? cookieMatch.split('=')[1] : 'gkalah';
+        return userMapping[userName] || "24";
+    }
+
+    function formatDate(daysToAdd) {
+        let d = new Date();
+        d.setDate(d.getDate() + daysToAdd);
+        return d.toLocaleDateString('fr-FR');
+    }
+
+    // --- FONCTION D'ENVOI RÉELLE ---
+    function envoyerTache(statusKey, clientId, estimateId, userId) {
+        const config = CONFIG_ETATS[statusKey];
+        const body = new URLSearchParams();
+        body.append("action", "send");
+        body.append("mode", "create");
+        body.append("entity_id", clientId);
+        body.append("class_name", "Client");
+        body.append("task_mode", "from_scratch");
+        body.append("task[name]", config.titre);
+        body.append("task[recall_date]", formatDate(config.delai));
+        body.append("task_actors_list_id", "user:" + userId);
+        body.append("task[event_type]", "195");
+        body.append("task[notes]", config.note);
+
+        if (estimateId) {
+            body.append("task_related_to_entity", "EstimateData");
+            body.append("selected_subentity_id", "EstimateData:" + estimateId);
+        }
+
+        fetch("https://courtage.modulr.fr/fr/scripts/Tasks/TasksManage.php", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+            body: body.toString()
+        }).then(() => {
+            console.log("✅ Tâche créée après rechargement !");
+            localStorage.removeItem('pending_modulr_task'); // On vide la mémoire
+        });
+    }
+
+    // --- ÉTAPE 1 : CAPTURER AVANT RECHARGEMENT ---
+    document.addEventListener('click', function(e) {
+        // Changement d'état via menu rapide
+        const link = e.target.closest('a');
+        if (link && link.href.includes('estimates_update.php')) {
+            const url = new URL(link.href, window.location.origin);
+            const statusKey = url.searchParams.get('status_key');
+            if (CONFIG_ETATS[statusKey]) {
+                localStorage.setItem('pending_modulr_task', JSON.stringify({
+                    statusKey: statusKey,
+                    estimateId: url.searchParams.get('estimate_id'),
+                    clientId: new URLSearchParams(window.location.search).get('id'),
+                    userId: getActiveUserId()
+                }));
+            }
+            return;
+        }
+
+        // Création de devis via formulaire
+        const btn = e.target.closest('button[type="submit"], input[type="submit"]');
+        if (btn && window.location.href.includes('estimates_manage.php')) {
+            const form = btn.form;
+            const statusKey = form.querySelector('[name="estimate[status]"]')?.value;
+            if (CONFIG_ETATS[statusKey]) {
+                localStorage.setItem('pending_modulr_task', JSON.stringify({
+                    statusKey: statusKey,
+                    clientId: form.querySelector('[name="estimate[client_id]"]')?.value,
+                    userId: form.querySelector('[name="estimate[referent_user_id]"]')?.value || getActiveUserId(),
+                    isNew: true // On marque que c'est un nouveau devis
+                }));
+            }
+        }
+    }, true);
+
+    // --- ÉTAPE 2 : EXÉCUTER APRÈS RECHARGEMENT ---
+    window.addEventListener('load', function() {
+        const pending = localStorage.getItem('pending_modulr_task');
+        if (pending) {
+            const data = JSON.parse(pending);
+            let estimateId = data.estimateId;
+
+            // Si c'est un nouveau devis, on cherche l'ID du dernier devis affiché sur la fiche client
+            if (data.isNew) {
+                // Modulr met souvent l'ID dans des éléments comme id="element_toggle_estimate_XXXX"
+                const lastEstimate = document.querySelector('[id*="element_toggle_estimate_"]');
+                if (lastEstimate) {
+                    estimateId = lastEstimate.id.replace('element_toggle_estimate_', '');
+                }
+            }
+
+            // On attend 1 seconde pour être sûr que la session est bien prête
+            setTimeout(() => {
+                envoyerTache(data.statusKey, data.clientId, estimateId, data.userId);
+            }, 1000);
+        }
+    });
+
+})();
