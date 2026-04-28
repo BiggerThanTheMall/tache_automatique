@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name         Modulr - Automatisation Post-Rechargement
-// @namespace    http://tampermonkey.net/
-// @version      10.0.0
-// @description  Crée une tache automatique au changement d'états de devis.
-// @author       le G
+// @name         Creation Tâche Automatique Changement Etat Devis
+// @namespace    https://github.com/BiggerThanTheMall
+// @version      10.0.1
+// @description  Crée automatiquement une tâche liée au devis lors de sa création ou d'un changement d'état
+// @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
+// @icon         https://courtage.modulr.fr/images/favicons/favicon-32x32.png
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/raw/main/creation_tache_automatique_changement_etat_devis.user.js
-// @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/raw/main/creation_tache_automatique_changement_etat_devis.user.js
+// @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/main/creation_tache_automatique_changement_etat_devis.user.js
+// @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/tache_automatique/main/creation_tache_automatique_changement_etat_devis.user.js
 // ==/UserScript==
 
 
