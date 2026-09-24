@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.1
+// @version      11.2.2
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.1';
+    const VERSION = '11.2.2';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -1080,6 +1080,126 @@
         );
     }
 
+    function extractUserIdNearRoleDetailed(
+        root,
+        rolePatterns,
+        sourceLabel
+    ) {
+        if (!root) {
+            return {
+                userId: '',
+                source: 'conteneur absent'
+            };
+        }
+
+        const normalizedRoles =
+            rolePatterns.map(
+                role =>
+                    normalizeText(
+                        role
+                    )
+            );
+
+        const elements =
+            Array.from(
+                root.querySelectorAll(
+                    'label, th, td, p, li, span, strong, b, div'
+                )
+            )
+                .filter(
+                    element => {
+                        const text =
+                            normalizeText(
+                                element.textContent || ''
+                            );
+
+                        return normalizedRoles.some(
+                            role =>
+                                text.includes(
+                                    role
+                                )
+                        );
+                    }
+                )
+                .sort(
+                    (a, b) =>
+                        normalizeText(
+                            a.textContent || ''
+                        ).length
+                        -
+                        normalizeText(
+                            b.textContent || ''
+                        ).length
+                );
+
+        for (const element of elements) {
+            const contexts = [
+                element,
+                element.nextElementSibling,
+                element.parentElement,
+                element.closest(
+                    'tr, p, li, .form-group, .control-group, .row'
+                )
+            ].filter(Boolean);
+
+            for (const context of contexts) {
+                let text =
+                    normalizeText(
+                        context.textContent || ''
+                    );
+
+                context
+                    .querySelectorAll?.(
+                        '[title], [aria-label], [data-original-title], [data-title]'
+                    )
+                    .forEach(
+                        el => {
+                            text +=
+                                ' '
+                                +
+                                normalizeText(
+                                    el.getAttribute('title')
+                                    ||
+                                    el.getAttribute('aria-label')
+                                    ||
+                                    el.getAttribute('data-original-title')
+                                    ||
+                                    el.getAttribute('data-title')
+                                    ||
+                                    ''
+                                );
+                        }
+                    );
+
+                for (const user of USER_TEXT_MAPPING) {
+                    for (const pattern of user.patterns) {
+                        if (
+                            text.includes(
+                                normalizeText(
+                                    pattern
+                                )
+                            )
+                        ) {
+                            return {
+                                userId:
+                                    user.id,
+
+                                source:
+                                    `${sourceLabel} près du libellé (${pattern})`
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        return {
+            userId: '',
+            source:
+                `${sourceLabel} introuvable près de son libellé`
+        };
+    }
+
     function extractUserIdFromElementDetailed(
         root
     ) {
@@ -1112,7 +1232,6 @@
             ) {
                 const values = [
                     element.value,
-
                     element.getAttribute(
                         'data-referent-user-id'
                     )
@@ -1141,82 +1260,78 @@
             }
         }
 
-        let text =
-            normalizeText(
-                root.textContent || ''
-            );
+        return extractUserIdNearRoleDetailed(
+            root,
+            ['référent', 'referent'],
+            'référent'
+        );
+    }
 
+    function extractBinomeUserIdFromElementDetailed(
         root
-            .querySelectorAll(
-                '[title], [aria-label], [data-original-title], [data-title]'
-            )
-            .forEach(
-                el => {
-                    text +=
-                        ' '
-                        +
-                        normalizeText(
-                            el.getAttribute(
-                                'title'
-                            )
+    ) {
+        if (
+            !root
+        ) {
+            return {
+                userId: '',
+                source: 'conteneur absent'
+            };
+        }
 
-                            ||
-
-                            el.getAttribute(
-                                'aria-label'
-                            )
-
-                            ||
-
-                            el.getAttribute(
-                                'data-original-title'
-                            )
-
-                            ||
-
-                            el.getAttribute(
-                                'data-title'
-                            )
-
-                            ||
-
-                            ''
-                        );
-                }
-            );
+        const fieldSelectors = [
+            '[name="estimate[binome_user_id]"]',
+            '[name="binome_user_id"]',
+            '[name*="binome_user_id"]',
+            '[name*="binome"][name*="user"]',
+            '[data-binome-user-id]'
+        ];
 
         for (
-            const user
-            of USER_TEXT_MAPPING
+            const selector
+            of fieldSelectors
         ) {
             for (
-                const pattern
-                of user.patterns
+                const element
+                of root.querySelectorAll(
+                    selector
+                )
             ) {
-                if (
-                    text.includes(
-                        normalizeText(
-                            pattern
-                        )
+                const values = [
+                    element.value,
+                    element.getAttribute(
+                        'data-binome-user-id'
                     )
-                ) {
-                    return {
-                        userId:
-                            user.id,
+                ];
 
-                        source:
-                            `texte du conteneur devis (${pattern})`
-                    };
+                for (
+                    const value
+                    of values
+                ) {
+                    const userId =
+                        normalizeUserId(
+                            value
+                        );
+
+                    if (
+                        userId
+                    ) {
+                        return {
+                            userId,
+
+                            source:
+                                `conteneur devis ${selector}`
+                        };
+                    }
                 }
             }
         }
 
-        return {
-            userId: '',
-
-            source:
-                'introuvable dans le conteneur du devis'
-        };
+        return extractUserIdNearRoleDetailed(
+            root,
+            ['binôme', 'binome'],
+            'binôme'
+        );
     }
 
     function getReferentUserIdFromEstimateRootDetailed(
@@ -1231,6 +1346,31 @@
 
         const result =
             extractUserIdFromElementDetailed(
+                container
+            );
+
+        return {
+            ...result,
+
+            containerFound:
+                Boolean(
+                    container
+                )
+        };
+    }
+
+    function getBinomeUserIdFromEstimateRootDetailed(
+        root,
+        estimateId
+    ) {
+        const container =
+            findEstimateContainerInRoot(
+                root,
+                estimateId
+            );
+
+        const result =
+            extractBinomeUserIdFromElementDetailed(
                 container
             );
 
@@ -1933,23 +2073,81 @@
         if (
             !referent.userId
         ) {
-            const activeUser =
-                getActiveUserInfo();
+            const responseDoc =
+                new DOMParser()
+                    .parseFromString(
+                        nativeResult.html
+                        ||
+                        '',
+
+                        'text/html'
+                    );
+
+            let binome =
+                getBinomeUserIdFromEstimateRootDetailed(
+                    responseDoc,
+                    estimateId
+                );
 
             if (
-                !activeUser.userId
+                !binome.userId
             ) {
-                throw new Error(
-                    'Référent introuvable et utilisateur connecté non identifiable.'
-                );
+                try {
+                    const freshPage =
+                        await fetchFreshPage(
+                            nativeResult.finalUrl
+                        );
+
+                    binome =
+                        getBinomeUserIdFromEstimateRootDetailed(
+                            freshPage.doc,
+                            estimateId
+                        );
+
+                } catch (
+                    err
+                ) {
+                    warn(
+                        '⚠️ Vérification ciblée du binôme impossible :',
+                        err
+                    );
+                }
             }
 
-            referent =
-                activeUser;
+            if (
+                binome.userId
+            ) {
+                referent = {
+                    userId:
+                        binome.userId,
 
-            warn(
-                `⚠️ Fallback final vers l’utilisateur connecté : ${activeUser.displayName} (user:${activeUser.userId}).`
-            );
+                    source:
+                        `fallback binôme → ${binome.source}`
+                };
+
+                log(
+                    `✅ Référent introuvable. Fallback binôme : user:${binome.userId} (${binome.source})`
+                );
+
+            } else {
+                const activeUser =
+                    getActiveUserInfo();
+
+                if (
+                    !activeUser.userId
+                ) {
+                    throw new Error(
+                        'Référent et binôme introuvables et utilisateur connecté non identifiable.'
+                    );
+                }
+
+                referent =
+                    activeUser;
+
+                warn(
+                    `⚠️ Référent et binôme introuvables. Fallback final vers l’utilisateur connecté : ${activeUser.displayName} (user:${activeUser.userId}).`
+                );
+            }
         }
 
         return {
@@ -2247,7 +2445,7 @@
         estimateId
     ) {
         section(
-            'RECHERCHE DU RÉFÉRENT DU DEVIS EXISTANT'
+            'RECHERCHE DE L’ASSIGNÉ DU DEVIS EXISTANT'
         );
 
         const url =
@@ -2277,17 +2475,6 @@
                         .get(
                             'referent_id'
                         )
-            },
-
-            {
-                source:
-                    'URL / user_id',
-
-                value:
-                    url.searchParams
-                        .get(
-                            'user_id'
-                        )
             }
         ];
 
@@ -2316,51 +2503,53 @@
             }
         }
 
-        const directResult =
+        const directReferent =
             getReferentUserIdFromEstimateRootDetailed(
                 document,
                 estimateId
             );
 
         if (
-            directResult.userId
+            directReferent.userId
         ) {
             log(
-                `✅ Référent trouvé dans le devis ${estimateId} : user:${directResult.userId} (${directResult.source})`
+                `✅ Référent trouvé dans le devis ${estimateId} : user:${directReferent.userId} (${directReferent.source})`
             );
 
-            return directResult;
+            return directReferent;
         }
 
         warn(
             `⚠️ Référent non trouvé immédiatement pour le devis ${estimateId}. Vérification ciblée de la fiche client.`
         );
 
+        let freshPage = null;
+
         try {
-            const freshPage =
+            freshPage =
                 await fetchFreshPage(
                     window.location.href
                 );
 
-            const freshResult =
+            const freshReferent =
                 getReferentUserIdFromEstimateRootDetailed(
                     freshPage.doc,
                     estimateId
                 );
 
             if (
-                freshResult.userId
+                freshReferent.userId
             ) {
                 log(
-                    `✅ Référent trouvé après vérification ciblée : user:${freshResult.userId} (${freshResult.source})`
+                    `✅ Référent trouvé après vérification ciblée : user:${freshReferent.userId} (${freshReferent.source})`
                 );
 
                 return {
                     userId:
-                        freshResult.userId,
+                        freshReferent.userId,
 
                     source:
-                        `vérification ciblée → ${freshResult.source}`
+                        `vérification ciblée → ${freshReferent.source}`
                 };
             }
 
@@ -2373,6 +2562,54 @@
             );
         }
 
+        const directBinome =
+            getBinomeUserIdFromEstimateRootDetailed(
+                document,
+                estimateId
+            );
+
+        if (
+            directBinome.userId
+        ) {
+            log(
+                `✅ Aucun référent trouvé. Fallback binôme : user:${directBinome.userId} (${directBinome.source})`
+            );
+
+            return {
+                userId:
+                    directBinome.userId,
+
+                source:
+                    `fallback binôme → ${directBinome.source}`
+            };
+        }
+
+        if (
+            freshPage
+        ) {
+            const freshBinome =
+                getBinomeUserIdFromEstimateRootDetailed(
+                    freshPage.doc,
+                    estimateId
+                );
+
+            if (
+                freshBinome.userId
+            ) {
+                log(
+                    `✅ Aucun référent trouvé. Fallback binôme après vérification ciblée : user:${freshBinome.userId} (${freshBinome.source})`
+                );
+
+                return {
+                    userId:
+                        freshBinome.userId,
+
+                    source:
+                        `fallback binôme après vérification ciblée → ${freshBinome.source}`
+                };
+            }
+        }
+
         const activeUser =
             getActiveUserInfo();
 
@@ -2380,12 +2617,12 @@
             !activeUser.userId
         ) {
             throw new Error(
-                `Référent du devis ${estimateId} introuvable et utilisateur connecté non identifiable.`
+                `Référent et binôme du devis ${estimateId} introuvables et utilisateur connecté non identifiable.`
             );
         }
 
         warn(
-            `⚠️ Référent réellement introuvable. Fallback final vers ${activeUser.displayName} (user:${activeUser.userId}).`
+            `⚠️ Référent et binôme réellement introuvables. Fallback final vers ${activeUser.displayName} (user:${activeUser.userId}).`
         );
 
         return activeUser;
