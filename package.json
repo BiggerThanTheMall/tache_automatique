@@ -1,0 +1,6 @@
+{
+  "name": "modulr-task-assignment-tests",
+  "private": true,
+  "scripts": { "test": "node assignment.test.cjs" },
+  "devDependencies": { "jsdom": "30.1.1" }
+}
