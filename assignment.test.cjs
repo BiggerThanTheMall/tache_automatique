@@ -4,7 +4,7 @@ const { JSDOM } = require('jsdom');
 const file = __dirname + '/creation_tache_automatique_changement_etat_devis.user.js';
 const source = fs.readFileSync(file, 'utf8').replace(
     "    document.addEventListener(\n        'click',",
-    "    window.testAPI = { readRoleDetailed, readRoleControl, identifyUserText, readAssignmentSnapshot, chooseAssignment, resolveEstimateAssignment, createTask, handleEstimateFormSubmit, resolveNewEstimateContext }; return;\n    document.addEventListener(\n        'click',"
+    "    window.testAPI = { getEstimateIdFromForm, readRoleDetailed, readRoleControl, identifyUserText, readAssignmentSnapshot, chooseAssignment, resolveEstimateAssignment, createTask, handleEstimateFormSubmit, resolveNewEstimateContext }; return;\n    document.addEventListener(\n        'click',"
 );
 const cases = [];
 function test(name, run) { cases.push({ name, run }); }
@@ -163,6 +163,63 @@ test('live loading field cannot be replaced by a default from refreshed HTML', a
             ctx.w.document.querySelector('select').innerHTML = '<option value="36" selected>Louli</option>';
         }, 900);
         assert.equal((await ctx.api.resolveEstimateAssignment({ estimateId: '123', timeoutMs: 2500 })).userId, '36');
+    } finally { ctx.close(); }
+});
+test('creation ID zero never inherits another estimate from the page', () => {
+    const ctx = setup('<section>' + card(pair('24', '28')) + '<form action="?id=42&estimate_id=0"></form></section>');
+    try { assert.equal(ctx.api.getEstimateIdFromForm(ctx.w.document.querySelector('form')), ''); }
+    finally { ctx.close(); }
+});
+test('explicit existing form ID still wins over creation URL', () => {
+    const ctx = setup('<form action="?id=42&estimate_id=0"><input name="estimate[id]" value="456"></form>');
+    try { assert.equal(ctx.api.getEstimateIdFromForm(ctx.w.document.querySelector('form')), '456'); }
+    finally { ctx.close(); }
+});
+test('new estimate cannot use an existing ID from redirect URL', async () => {
+    const ctx = setup('<form>' + pair('36', '28') + '</form>');
+    try {
+        const result = await ctx.api.resolveNewEstimateContext({
+            idsBefore: new Set(['123']), nativeResult: {
+                finalUrl: 'https://courtage.modulr.fr/fr/client.php?id=42&estimate_id=123',
+                html: '<div id="element_toggle_estimate_456"></div>'
+            }, form: ctx.w.document.querySelector('form')
+        });
+        assert.equal(result.estimateId, '456');
+    } finally { ctx.close(); }
+});
+test('unknown assignee on new estimate blocks saving and explains stage', async () => {
+    const ctx = setup('<form action="?id=42&estimate_id=0" method="post"><input name="estimate[client_id]" value="42"><input name="estimate[status]" value="pricing"></form>');
+    let message = '';
+    ctx.w.alert = value => { message = value; };
+    try {
+        await ctx.api.handleEstimateFormSubmit(ctx.w.document.querySelector('form'), null,
+            { preventDefault() {}, stopImmediatePropagation() {}, type: 'submit' });
+        assert.equal(ctx.requests.filter(r => r.options.method === 'POST').length, 0);
+        assert.match(message, /avant enregistrement/);
+        assert.match(message, /Référent ou binôme non confirmé/);
+        assert.match(message, /Aucun enregistrement/);
+    } finally { ctx.close(); }
+});
+test('new form with known Louli saves then creates task on new ID', async () => {
+    const ctx = setup('<section>' + card(pair('24', '28')) + '<form action="?id=42&estimate_id=0" method="post"><input name="estimate[client_id]" value="42"><input name="estimate[status]" value="pricing">' + pair('36', '28') + '</form></section>');
+    let alert = '';
+    ctx.w.alert = value => { alert = value; };
+    ctx.w.fetch = async (url, options = {}) => {
+        ctx.requests.push({ url, options });
+        return { ok: true, status: 200,
+            url: 'https://courtage.modulr.fr/fr/client.php?id=42',
+            text: async () => card(pair('24', '28')) + '<div class="card" id="element_toggle_estimate_456">' + pair('36', '28') + '</div>' };
+    };
+    try {
+        await ctx.api.handleEstimateFormSubmit(ctx.w.document.querySelector('form'), null,
+            { preventDefault() {}, stopImmediatePropagation() {}, type: 'submit' });
+        const posts = ctx.requests.filter(r => r.options.method === 'POST');
+        assert.equal(posts.length, 2);
+        assert.ok(posts[0].options.body instanceof ctx.w.FormData);
+        const task = new URLSearchParams(posts[1].options.body);
+        assert.equal(task.get('task_actors_list_id'), 'user:36');
+        assert.equal(task.get('selected_subentity_id'), 'EstimateData:456');
+        assert.equal(alert, '');
     } finally { ctx.close(); }
 });
 (async () => {

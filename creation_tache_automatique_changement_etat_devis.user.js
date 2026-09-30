@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.3
+// @version      11.2.4
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.3';
+    const VERSION = '11.2.4';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -563,6 +563,14 @@
                     )
             }
         );
+
+        // An explicit creation URL/field must not inherit an older estimate
+        // found elsewhere in a parent of the form.
+        if (!candidates.some(candidate => normalizeEstimateId(candidate.value)) &&
+            candidates.some(candidate => String(candidate.value).trim() === '0')) {
+            log('Nouveau devis explicitement identifié (ID 0).');
+            return '';
+        }
 
         let node =
             form;
@@ -1771,7 +1779,7 @@
         });
 
         let estimateId =
-            finalUrlEstimateId;
+            idsBefore.has(finalUrlEstimateId) ? '' : finalUrlEstimateId;
 
         let estimateIdSource =
             estimateId
@@ -2557,6 +2565,9 @@
                 referentFromForm.source
         });
 
+        let stage = 'lecture du client';
+        let saveAttempted = false;
+        let taskAttempted = false;
         try {
             if (
                 !clientInfo.clientId
@@ -2569,11 +2580,14 @@
             if (
                 initialEstimateId
             ) {
+                stage = 'lecture du référent et du binôme';
                 const referent = await resolveEstimateAssignment({
                     estimateId: initialEstimateId,
                     form
                 });
 
+                stage = 'création de la tâche';
+                taskAttempted = true;
                 await createTask(
                     {
                         statusKey,
@@ -2597,6 +2611,8 @@
                     initialEstimateId
                 );
 
+                stage = 'enregistrement du devis';
+                saveAttempted = true;
                 submitFormNatively(
                     form,
                     submitter
@@ -2604,6 +2620,11 @@
 
                 return;
             }
+
+            // Resolve the responsible person before writing the new estimate.
+            // Previously this check ran only AFTER saving it in Modulr.
+            stage = 'lecture du référent et du binôme avant enregistrement';
+            await resolveEstimateAssignment({ estimateId: '', form });
 
             const idsBefore =
                 collectEstimateIdsFromRoot(
@@ -2650,6 +2671,8 @@
                 }
             );
 
+            stage = 'enregistrement du nouveau devis';
+            saveAttempted = true;
             const nativeResult =
                 await runNativeFormSubmitByFetch(
                     form,
@@ -2670,6 +2693,7 @@
                 }
             );
 
+            stage = 'identification du devis enregistré et confirmation du responsable';
             const context =
                 await resolveNewEstimateContext({
                     idsBefore,
@@ -2680,6 +2704,8 @@
                     form
                 });
 
+            stage = 'création de la tâche';
+            taskAttempted = true;
             await createTask(
                 {
                     statusKey,
@@ -2717,11 +2743,13 @@
             isProcessing =
                 false;
 
-            alert(
-                "L'enregistrement du devis ou la création de la tâche automatique n'a pas pu être confirmé.\n\n"
-                +
-                'Merci de vérifier dans Modulr avant de refaire l’action, afin d’éviter une double tâche.'
-            );
+            const reason = err instanceof Error ? err.message : String(err);
+            error('Diagnostic formulaire :', { version: VERSION, stage,
+                saveAttempted, taskAttempted, estimateId: initialEstimateId || 'nouveau', reason });
+            alert(`Blocage à l’étape : ${stage}.\n\n${reason}\n\n` +
+                (saveAttempted || taskAttempted
+                    ? 'Une requête a déjà été envoyée à Modulr. Vérifiez le devis et ses tâches avant de réessayer.'
+                    : 'Aucun enregistrement de devis ni aucune création de tâche n’a été envoyé par le script.'));
         }
     }
 
