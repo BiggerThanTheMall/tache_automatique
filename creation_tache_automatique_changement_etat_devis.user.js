@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.6
+// @version      11.2.7
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.6';
+    const VERSION = '11.2.7';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -706,7 +706,7 @@
 
         root
             .querySelectorAll(
-                '[id*="element_toggle_estimate_"]'
+                '[id*="element_toggle_estimate_"], [id*="element_toggle_EstimateData_"], [data-class_name="EstimateData"][data-entity_id]'
             )
             .forEach(
                 el => {
@@ -715,8 +715,14 @@
                             el.id || ''
                         )
                             .match(
-                                /element_toggle_estimate_(\d+)/i
+                                /element_toggle_(?:estimate|EstimateData)_(\d+)/i
                             );
+
+                    const dataEntityId = el.getAttribute?.('data-entity_id');
+
+                    if (!match && dataEntityId) {
+                        addValidEstimateId(ids, dataEntityId);
+                    }
 
                     if (
                         match
@@ -829,7 +835,7 @@
             );
 
         const regexes = [
-            /element_toggle_estimate_(\d+)/gi,
+            /element_toggle_(?:estimate|EstimateData)_(\d+)/gi,
             /EstimateData:(\d+)/gi,
             /[?&](?:estimate_id|id_estimate)=(\d+)/gi
         ];
@@ -874,7 +880,7 @@
                 openParam || ''
             )
                 .match(
-                    /^element_toggle_estimate_(\d+)$/i
+                    /^element_toggle_(?:estimate|EstimateData)_(\d+)$/i
                 );
 
         if (
@@ -938,15 +944,16 @@
             );
 
         const selectors = [
+            // Structure réelle de la fiche client Modulr observée en production.
+            `[data-class_name="EstimateData"][data-entity_id="${CSS.escape(id)}"]`,
+            `#element_toggle_EstimateData_${CSS.escape(id)}`,
+            `#container_EstimateData_${CSS.escape(id)}`,
             `#element_toggle_estimate_${CSS.escape(id)}`,
-
             `[data-estimate-id="${CSS.escape(id)}"]`,
-
+            `[value="EstimateData:${CSS.escape(id)}"]`,
+            // Les liens arrivent en dernier : sinon on s'arrête dans le <li> du menu d'état.
             `a[href*="estimate_id=${encodeURIComponent(id)}"]`,
-
-            `a[href*="id_estimate=${encodeURIComponent(id)}"]`,
-
-            `[value="EstimateData:${CSS.escape(id)}"]`
+            `a[href*="id_estimate=${encodeURIComponent(id)}"]`
         ];
 
         for (
@@ -2246,8 +2253,41 @@
         throw new Error('Référent ou binôme non lisible par le script malgré les données affichées dans Modulr.');
     }
 
-    async function resolveExistingEstimateReferent(link, estimateId) {
-        return resolveEstimateAssignment({ estimateId });
+    async function resolveExistingEstimateReferent(link, estimateId, clientId = '') {
+        // Sur la fiche client, les détails du devis sont chargés en AJAX.
+        // Le HTML initial ne contient donc ni Référent ni Binôme.
+        // On tente d'abord le DOM live, puis on lit directement la page de modification du devis.
+        try {
+            return await resolveEstimateAssignment({ estimateId, timeoutMs: 1200 });
+        } catch (liveError) {
+            warn('Assignation absente du HTML initial / détails AJAX non chargés :', liveError);
+        }
+
+        const editUrl = new URL('/fr/scripts/estimates/estimates_manage.php', window.location.origin);
+        if (clientId) editUrl.searchParams.set('client_id', clientId);
+        editUrl.searchParams.set('estimate_id', estimateId);
+
+        const freshEdit = await fetchFreshPage(editUrl.href);
+        const editForm =
+            freshEdit.doc.querySelector('form[action*="estimates"], form') ||
+            null;
+
+        // La page de modification est la source fiable : elle contient les valeurs enregistrées.
+        const snapshot = readAssignmentSnapshot(freshEdit.doc, estimateId, editForm);
+        const chosen = chooseAssignment(snapshot);
+
+        if (chosen) {
+            return { ...chosen, source: 'page modification devis → ' + chosen.source };
+        }
+
+        if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'empty') {
+            return chooseAssignment(snapshot, true);
+        }
+
+        console.table(snapshot);
+        throw new Error(
+            'Référent/binôme absents du HTML initial et non lisibles sur la page de modification du devis.'
+        );
     }
 
     async function handleEstimateStatusUpdate(
@@ -2437,7 +2477,8 @@
             const referent =
                 await resolveExistingEstimateReferent(
                     link,
-                    estimateId
+                    estimateId,
+                    clientId
                 );
 
             if (
@@ -2515,12 +2556,13 @@
             isProcessing =
                 false;
 
+            const reason = err instanceof Error ? err.message : String(err);
             alert(
                 "La tâche automatique n'a pas pu être créée correctement.\n\n"
                 +
-                "Le changement d'état n'a pas été lancé afin d'éviter une incohérence.\n\n"
+                "Cause : " + reason + "\n\n"
                 +
-                'Merci de vérifier dans Modulr avant de refaire l’action.'
+                "Le changement d'état n'a pas été lancé afin d'éviter une incohérence."
             );
         }
     }
