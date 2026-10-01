@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.4';
+    const VERSION = '11.2.5';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -990,8 +990,14 @@
     }
 
     function parseAssignedUserId(value) {
-        const match = String(value || '').trim().match(/^(?:user:)?([1-9]\d*)$/);
-        return match ? match[1] : '';
+        const raw = String(value ?? '').trim();
+        if (!raw) return '';
+
+        // Modulr peut renvoyer l'identifiant sous plusieurs formes selon le widget
+        // (36, user:36, UserData:36, valeur sérialisée, etc.).
+        const numericTokens = raw.match(/\d+/g) || [];
+        const unique = Array.from(new Set(numericTokens.filter(token => /^[1-9]\d*$/.test(token))));
+        return unique.length === 1 ? unique[0] : '';
     }
 
     function identifyUserText(text) {
@@ -1034,10 +1040,42 @@
                 return roleResult('unknown', '', source);
             return roleResult('empty', '', source);
         }
-        const value = field.value ?? field.getAttribute('data-' + role + '-user-id');
-        const id = parseAssignedUserId(value);
-        if (id) return roleResult('assigned', id, source);
-        if (value === '' || String(value) === '0') return roleResult('empty', '', source);
+        const rawValues = [
+            field.value,
+            field.getAttribute('data-' + role + '-user-id'),
+            field.getAttribute('data-user-id'),
+            field.getAttribute('data-value'),
+            field.getAttribute('data-id')
+        ].filter(value => value !== null && value !== undefined);
+
+        for (const value of rawValues) {
+            const id = parseAssignedUserId(value);
+            if (id) return roleResult('assigned', id, source);
+        }
+
+        // Select2 / widgets Modulr : la vraie valeur peut être affichée à côté du champ
+        // alors que l'input technique reste vide.
+        const widgetCandidates = [];
+        if (field.id) {
+            const escapedId = CSS.escape(field.id);
+            widgetCandidates.push(
+                field.ownerDocument?.querySelector('#s2id_' + escapedId),
+                field.ownerDocument?.querySelector('#' + escapedId + '_chosen')
+            );
+        }
+        widgetCandidates.push(field.nextElementSibling, field.parentElement?.querySelector('.select2-chosen, .select2-selection__rendered'));
+
+        for (const widget of widgetCandidates.filter(Boolean)) {
+            const id = identifyUserText(
+                (widget.textContent || '') + ' ' +
+                (widget.getAttribute?.('title') || '') + ' ' +
+                (widget.getAttribute?.('data-original-title') || '')
+            );
+            if (id) return roleResult('assigned', id, source + ' via widget');
+        }
+
+        const hasExplicitEmpty = rawValues.some(value => String(value).trim() === '' || String(value).trim() === '0');
+        if (hasExplicitEmpty) return roleResult('empty', '', source);
         return roleResult('unknown', '', source);
     }
 
