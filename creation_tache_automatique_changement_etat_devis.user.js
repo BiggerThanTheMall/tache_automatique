@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.4
+// @version      11.2.5
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
