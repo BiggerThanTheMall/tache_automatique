@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.5
+// @version      11.2.6
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.5';
+    const VERSION = '11.2.6';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -1096,10 +1096,16 @@
                 '[class*="estimate"], [id*="estimate"], .task, [class*="task"], [id*="task"]')) ||
                 /estimate\[/.test(element.name || '');
         };
-        const controls = Array.from(root.querySelectorAll('input[name], select[name], [data-' + role + '-user-id]'))
-            .filter(el => !isForeign(el) && (
-                new RegExp('(?:^|\\[|_)' + role + '(?:_user)?_id(?:\\]|$)').test(el.name || '') ||
-                el.hasAttribute('data-' + role + '-user-id')));
+        const controls = Array.from(root.querySelectorAll('input[name], select[name], textarea[name], [data-' + role + '-user-id]'))
+            .filter(el => {
+                if (isForeign(el)) return false;
+                const name = normalizeText(el.name || '');
+                const strictMatch = new RegExp('(?:^|\\[|_)' + role + '(?:_user)?_id(?:\\]|$)').test(el.name || '');
+                // Compatibilité avec les champs réellement utilisés par Modulr avant la 11.2.3 :
+                // certains noms ne finissent pas exactement par *_user_id mais contiennent bien role + user.
+                const legacyMatch = name.includes(role) && name.includes('user');
+                return strictMatch || legacyMatch || el.hasAttribute('data-' + role + '-user-id');
+            });
         if (controls.length) return mergeRoleResults(controls.map(el => readRoleControl(el, role)), role);
         const labels = Array.from(root.querySelectorAll('label, th, td, dt, p, li, span, strong, b, div'))
             .filter(el => !isForeign(el) && !el.closest('select, option, .task, [class*="task"], [id*="task"]') &&
@@ -2176,54 +2182,68 @@
         pageUrl = window.location.href, responseDoc = null, timeoutMs = 6000 }) {
         const deadline = Date.now() + timeoutMs;
         let freshDoc = responseDoc;
-        let lastKey = '';
-        let stableSince = Date.now();
         let snapshot;
+
         async function refresh() {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(3000, deadline - Date.now())));
             try { return (await fetchFreshPage(pageUrl, controller.signal)).doc; }
             finally { clearTimeout(timer); }
         }
-        // Wait for role values to settle; an unreadable role is never an absent role.
-        while (true) {
+
+        // 11.2.6 : retour au comportement qui fonctionnait en 11.2.2.
+        // On cherche d'abord une valeur réellement sélectionnée dans le formulaire / devis,
+        // puis dans une fiche fraîche. On ne bloque plus 6 s uniquement parce qu'un autre
+        // rôle est "unknown" alors que le référent sélectionné est déjà lisible.
+        while (Date.now() < deadline) {
             snapshot = readAssignmentSnapshot(document, estimateId, form);
-            if (freshDoc) {
-                const fresh = readAssignmentSnapshot(freshDoc, estimateId);
-                // Use the refreshed page when the live role is not yet readable.
-                for (const role of ['referent', 'binome']) {
-                    const formRole = form && readRoleDetailed(form, role);
-                    const formHasRole = formRole && formRole.source !== role + ' non lisible';
-                    const liveAbsent = [role + ' non lisible', role + ' conteneur absent'].includes(snapshot[role].source);
-                    if (!formHasRole && liveAbsent && fresh[role].state !== 'unknown')
-                        snapshot[role] = fresh[role];
-                }
+
+            if (snapshot.referent.state === 'assigned') {
+                log('Référent trouvé directement :', snapshot.referent);
+                return snapshot.referent;
             }
-            const key = JSON.stringify(snapshot);
-            if (key !== lastKey) { lastKey = key; stableSince = Date.now(); }
-            const chosen = chooseAssignment(snapshot);
-            if (chosen && Date.now() - stableSince >= 600) {
-                log('Assignation confirmée avant envoi :', snapshot, chosen);
+
+            // Si le référent est explicitement vide, le binôme peut être utilisé immédiatement.
+            if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'assigned') {
+                const chosen = { ...snapshot.binome, source: 'fallback binôme → ' + snapshot.binome.source };
+                log('Référent vide, binôme trouvé :', chosen);
                 return chosen;
             }
-            const bothEmpty = snapshot.referent.state === 'empty' && snapshot.binome.state === 'empty';
-            if (bothEmpty && Date.now() - stableSince >= 600) {
-                if (!freshDoc) freshDoc = await refresh();
-                const verified = readAssignmentSnapshot(freshDoc, estimateId);
-                const verifiedChoice = chooseAssignment(verified);
-                if (verifiedChoice) return verifiedChoice;
-                if (verified.referent.state === 'empty' && verified.binome.state === 'empty')
-                    return chooseAssignment(snapshot, true);
-            }
-            if (Date.now() >= deadline) break;
+
             if (!freshDoc) {
                 try { freshDoc = await refresh(); }
-                catch (err) { warn('Vérification assignation indisponible :', err); }
+                catch (err) { warn('Vérification ciblée de la fiche indisponible :', err); }
             }
+
+            if (freshDoc) {
+                const fresh = readAssignmentSnapshot(freshDoc, estimateId);
+
+                if (fresh.referent.state === 'assigned') {
+                    return { ...fresh.referent, source: 'vérification ciblée → ' + fresh.referent.source };
+                }
+
+                if (fresh.referent.state === 'empty' && fresh.binome.state === 'assigned') {
+                    return { ...fresh.binome, source: 'fallback binôme après vérification ciblée → ' + fresh.binome.source };
+                }
+
+                // Les 2 rôles ne doivent tomber sur l'utilisateur connecté que lorsqu'ils sont
+                // explicitement vides dans une source fiable.
+                if (fresh.referent.state === 'empty' && fresh.binome.state === 'empty') {
+                    return chooseAssignment(fresh, true);
+                }
+            }
+
+            // Même règle pour le formulaire live : fallback connecté seulement si les 2 sont vides.
+            if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'empty') {
+                return chooseAssignment(snapshot, true);
+            }
+
             await new Promise(resolve => setTimeout(resolve, 150));
+            freshDoc = null;
         }
+
         console.table(snapshot);
-        throw new Error('Référent ou binôme non confirmé après chargement : aucune tâche envoyée à un autre utilisateur.');
+        throw new Error('Référent ou binôme non lisible par le script malgré les données affichées dans Modulr.');
     }
 
     async function resolveExistingEstimateReferent(link, estimateId) {
