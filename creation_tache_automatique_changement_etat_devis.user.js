@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.8
+// @version      11.2.9
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.8';
+    const VERSION = '11.2.9';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -74,6 +74,7 @@
     ];
 
     const STORAGE_PREFIX = 'modulr_auto_task_done_';
+    const PENDING_NEW_ESTIMATE_KEY = 'modulr_auto_task_pending_new_estimate_v1129';
     const DONE_DURATION_MS = 24 * 60 * 60 * 1000;
 
     let isProcessing = false;
@@ -447,6 +448,17 @@
         form
     ) {
         const candidates = [
+            {
+                source:
+                    '[name="estimate[estimate_id]"]',
+
+                value:
+                    form
+                        .querySelector(
+                            '[name="estimate[estimate_id]"]'
+                        )
+                        ?.value
+            },
             {
                 source:
                     '[name="estimate[id]"]',
@@ -2336,6 +2348,23 @@
             return;
         }
 
+        const earlyEstimateId = getEstimateIdFromForm(form);
+        if (!earlyEstimateId) {
+            // CRITIQUE : pour une création, on ne bloque plus JAMAIS le submit Modulr.
+            // On mémorise seulement le contexte, puis on laisse le navigateur faire son enregistrement natif.
+            const earlyClientInfo = getClientIdFromFormDetailed(form);
+            const earlyReferent = getReferentUserIdFromFormDetailed(form);
+            if (earlyClientInfo.clientId) {
+                rememberPendingNewEstimate({
+                    form,
+                    statusKey,
+                    clientInfo: earlyClientInfo,
+                    referentFromForm: earlyReferent
+                });
+            }
+            return;
+        }
+
         event.preventDefault();
 
         event
@@ -2565,6 +2594,91 @@
                 "Le changement d'état n'a pas été lancé afin d'éviter une incohérence."
             );
         }
+    }
+
+
+    function rememberPendingNewEstimate({ form, statusKey, clientInfo, referentFromForm }) {
+        const active = getActiveUserInfo();
+        const userId = referentFromForm.userId || active.userId || '';
+        const source = referentFromForm.userId
+            ? referentFromForm.source
+            : 'nouveau devis sans référent sélectionné → utilisateur connecté';
+
+        const payload = {
+            createdAt: Date.now(),
+            clientId: clientInfo.clientId,
+            statusKey,
+            userId,
+            referentSource: source,
+            idsBefore: Array.from(collectEstimateIdsFromRoot(document))
+        };
+
+        try {
+            sessionStorage.setItem(PENDING_NEW_ESTIMATE_KEY, JSON.stringify(payload));
+            log('Nouveau devis laissé à Modulr en natif ; tâche mémorisée pour après enregistrement :', payload);
+        } catch (err) {
+            warn('Impossible de mémoriser la tâche différée du nouveau devis :', err);
+        }
+    }
+
+    async function processPendingNewEstimate() {
+        let pending;
+        try {
+            pending = JSON.parse(sessionStorage.getItem(PENDING_NEW_ESTIMATE_KEY) || 'null');
+        } catch (_) {
+            sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
+            return;
+        }
+        if (!pending) return;
+
+        // Ne jamais garder un ancien contexte.
+        if (!pending.createdAt || Date.now() - pending.createdAt > 5 * 60 * 1000) {
+            sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
+            return;
+        }
+
+        // Attendre que Modulr ait réellement rendu la page suivante.
+        for (let attempt = 0; attempt < 12; attempt++) {
+            const directId =
+                normalizeEstimateId(getParamFromUrl(window.location.href, 'estimate_id')) ||
+                normalizeEstimateId(getParamFromUrl(window.location.href, 'id_estimate'));
+
+            const idsAfter = Array.from(collectEstimateIdsFromRoot(document));
+            const before = new Set((pending.idsBefore || []).map(String));
+            const newIds = idsAfter.filter(id => !before.has(String(id)));
+            const estimateId = directId || (newIds.length === 1 ? newIds[0] : '');
+
+            if (estimateId) {
+                try {
+                    await createTask(
+                        {
+                            statusKey: pending.statusKey,
+                            clientId: pending.clientId,
+                            clientSource: 'nouveau devis enregistré nativement par Modulr',
+                            userId: pending.userId,
+                            referentSource: pending.referentSource,
+                            estimateIdSource: directId
+                                ? 'URL après enregistrement natif'
+                                : 'nouvel ID détecté après enregistrement natif'
+                        },
+                        estimateId
+                    );
+                    sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
+                    log('✅ Tâche créée après enregistrement natif du nouveau devis :', estimateId);
+                    return;
+                } catch (err) {
+                    error('Création différée de tâche impossible après enregistrement natif :', err);
+                    // Le devis est déjà enregistré : ne jamais bloquer l'utilisateur.
+                    sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
+                    return;
+                }
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        warn('Nouveau devis enregistré mais ID non retrouvé pour la tâche automatique. Aucun blocage utilisateur.');
+        sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
     }
 
     async function handleEstimateFormSubmit(
@@ -2972,7 +3086,10 @@
 
     window.addEventListener(
         'load',
-        cleanOldDoneKeys
+        () => {
+            cleanOldDoneKeys();
+            processPendingNewEstimate();
+        }
     );
 
 })();
