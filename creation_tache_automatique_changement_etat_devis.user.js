@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.7
+// @version      11.2.8
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.7';
+    const VERSION = '11.2.8';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -2721,10 +2721,21 @@
                 return;
             }
 
-            // Resolve the responsible person before writing the new estimate.
-            // Previously this check ran only AFTER saving it in Modulr.
-            stage = 'lecture du référent et du binôme avant enregistrement';
-            await resolveEstimateAssignment({ estimateId: '', form });
+            // Nouveau devis : le formulaire Modulr expose directement
+            // estimate[referent_user_id], mais aucun champ binôme.
+            // Ne jamais bloquer l'enregistrement en attendant un binôme qui n'existe pas ici.
+            stage = 'lecture du référent avant enregistrement';
+            let newEstimateAssignee = referentFromForm;
+
+            if (!newEstimateAssignee.userId) {
+                const activeUser = getActiveUserInfo();
+                if (activeUser.userId) {
+                    newEstimateAssignee = {
+                        userId: activeUser.userId,
+                        source: 'nouveau devis sans référent sélectionné → utilisateur connecté'
+                    };
+                }
+            }
 
             const idsBefore =
                 collectEstimateIdsFromRoot(
@@ -2800,7 +2811,7 @@
 
                     nativeResult,
 
-                    referentFromForm,
+                    referentFromForm: newEstimateAssignee,
                     form
                 });
 
@@ -2846,10 +2857,20 @@
             const reason = err instanceof Error ? err.message : String(err);
             error('Diagnostic formulaire :', { version: VERSION, stage,
                 saveAttempted, taskAttempted, estimateId: initialEstimateId || 'nouveau', reason });
-            alert(`Blocage à l’étape : ${stage}.\n\n${reason}\n\n` +
-                (saveAttempted || taskAttempted
-                    ? 'Une requête a déjà été envoyée à Modulr. Vérifiez le devis et ses tâches avant de réessayer.'
-                    : 'Aucun enregistrement de devis ni aucune création de tâche n’a été envoyé par le script.'));
+            // 11.2.8 : fail-open. L'automatisation ne doit jamais empêcher
+            // l'utilisateur d'enregistrer ou modifier un devis dans Modulr.
+            if (!saveAttempted) {
+                warn('Automatisation en échec avant sauvegarde : poursuite de l’enregistrement natif Modulr.');
+                try {
+                    submitFormNatively(form, submitter);
+                    return;
+                } catch (nativeErr) {
+                    error('Échec du fallback natif Modulr :', nativeErr);
+                }
+            }
+
+            alert(`Automatisation de tâche en échec à l’étape : ${stage}.\n\n${reason}\n\n` +
+                'Le devis reste prioritaire : vérifiez simplement si la tâche a bien été créée.');
         }
     }
 
