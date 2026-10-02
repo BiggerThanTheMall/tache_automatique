@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Creation Tâche Automatique Changement Etat Devis
 // @namespace    https://github.com/BiggerThanTheMall
-// @version      11.2.9
+// @version      11.3.0
 // @description  Crée automatiquement une tâche liée au bon client, au bon devis et au bon référent lors de la création ou du changement d'état d'un devis.
 // @author       BiggerThanTheMall
 // @match        https://courtage.modulr.fr/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '11.2.9';
+    const VERSION = '11.3.0';
     const DEBUG = true;
 
     const CONFIG_ETATS = {
@@ -66,7 +66,7 @@
         { id: '33', patterns: ['dkalah'] },
         { id: '23', patterns: ['ekalah', 'eddy kalah', 'eddy'] },
         { id: '24', patterns: ['gkalah', 'ghais kalah', 'ghaïs kalah', 'ghais', 'ghaïs'] },
-        { id: '28', patterns: ['jcasimir', 'casimir', 'jake'] },
+        { id: '28', patterns: ['jcasimir', 'casimir'] },
         { id: '36', patterns: ['lvulliod', 'louli vulliod', 'louli'] },
         { id: '22', patterns: ['nkalah', 'nadia kalah', 'nadia'] },
         { id: '2', patterns: ['skrief', 'sheana krief', 'shéana krief', 'sheana', 'shéana'] },
@@ -74,7 +74,6 @@
     ];
 
     const STORAGE_PREFIX = 'modulr_auto_task_done_';
-    const PENDING_NEW_ESTIMATE_KEY = 'modulr_auto_task_pending_new_estimate_v1129';
     const DONE_DURATION_MS = 24 * 60 * 60 * 1000;
 
     let isProcessing = false;
@@ -440,8 +439,55 @@
         );
     }
 
-    function getReferentUserIdFromFormDetailed(form) {
-        return readRoleDetailed(form, 'referent');
+    function getReferentUserIdFromFormDetailed(
+        form
+    ) {
+        const selectors = [
+            '[name="estimate[referent_user_id]"]',
+            '[name="referent_user_id"]',
+            '[name*="referent_user_id"]',
+            '[name*="referent"][name*="user"]'
+        ];
+
+        for (
+            const selector
+            of selectors
+        ) {
+            for (
+                const field
+                of form.querySelectorAll(
+                    selector
+                )
+            ) {
+                const userId =
+                    normalizeUserId(
+                        field.value
+                    );
+
+                if (
+                    userId
+                ) {
+                    return {
+                        userId,
+
+                        source:
+                            `formulaire ${selector}`,
+
+                        rawValue:
+                            field.value
+                    };
+                }
+            }
+        }
+
+        return {
+            userId: '',
+
+            source:
+                'introuvable dans le formulaire',
+
+            rawValue: ''
+        };
     }
 
     function getEstimateIdFromForm(
@@ -575,14 +621,6 @@
                     )
             }
         );
-
-        // An explicit creation URL/field must not inherit an older estimate
-        // found elsewhere in a parent of the form.
-        if (!candidates.some(candidate => normalizeEstimateId(candidate.value)) &&
-            candidates.some(candidate => String(candidate.value).trim() === '0')) {
-            log('Nouveau devis explicitement identifié (ID 0).');
-            return '';
-        }
 
         let node =
             form;
@@ -718,7 +756,7 @@
 
         root
             .querySelectorAll(
-                '[id*="element_toggle_estimate_"], [id*="element_toggle_EstimateData_"], [data-class_name="EstimateData"][data-entity_id]'
+                '[id*="element_toggle_estimate_"]'
             )
             .forEach(
                 el => {
@@ -727,14 +765,8 @@
                             el.id || ''
                         )
                             .match(
-                                /element_toggle_(?:estimate|EstimateData)_(\d+)/i
+                                /element_toggle_estimate_(\d+)/i
                             );
-
-                    const dataEntityId = el.getAttribute?.('data-entity_id');
-
-                    if (!match && dataEntityId) {
-                        addValidEstimateId(ids, dataEntityId);
-                    }
 
                     if (
                         match
@@ -847,7 +879,7 @@
             );
 
         const regexes = [
-            /element_toggle_(?:estimate|EstimateData)_(\d+)/gi,
+            /element_toggle_estimate_(\d+)/gi,
             /EstimateData:(\d+)/gi,
             /[?&](?:estimate_id|id_estimate)=(\d+)/gi
         ];
@@ -892,7 +924,7 @@
                 openParam || ''
             )
                 .match(
-                    /^element_toggle_(?:estimate|EstimateData)_(\d+)$/i
+                    /^element_toggle_estimate_(\d+)$/i
                 );
 
         if (
@@ -956,16 +988,15 @@
             );
 
         const selectors = [
-            // Structure réelle de la fiche client Modulr observée en production.
-            `[data-class_name="EstimateData"][data-entity_id="${CSS.escape(id)}"]`,
-            `#element_toggle_EstimateData_${CSS.escape(id)}`,
-            `#container_EstimateData_${CSS.escape(id)}`,
             `#element_toggle_estimate_${CSS.escape(id)}`,
+
             `[data-estimate-id="${CSS.escape(id)}"]`,
-            `[value="EstimateData:${CSS.escape(id)}"]`,
-            // Les liens arrivent en dernier : sinon on s'arrête dans le <li> du menu d'état.
+
             `a[href*="estimate_id=${encodeURIComponent(id)}"]`,
-            `a[href*="id_estimate=${encodeURIComponent(id)}"]`
+
+            `a[href*="id_estimate=${encodeURIComponent(id)}"]`,
+
+            `[value="EstimateData:${CSS.escape(id)}"]`
         ];
 
         for (
@@ -992,191 +1023,326 @@
         return null;
     }
 
-    function findEstimateContainerInRoot(root, estimateId) {
-        const anchor = findEstimateAnchorInRoot(root, estimateId);
-        if (!anchor) return null;
-        // Stop before a parent containing another estimate: never read its owner.
-        let node = anchor;
-        let best = anchor;
-        while (node && node !== root.body && node !== root.documentElement) {
-            const ids = collectEstimateIdsFromRoot(node);
-            if (Array.from(ids).some(id => id !== String(estimateId))) break;
-            best = node;
-            if (node.matches?.('tr, li, .card, .panel, .box, .well')) return node;
-            node = node.parentElement;
+    function findEstimateContainerInRoot(
+        root,
+        estimateId
+    ) {
+        const anchor =
+            findEstimateAnchorInRoot(
+                root,
+                estimateId
+            );
+
+        if (
+            !anchor
+        ) {
+            return null;
         }
-        return best;
-    }
 
-    function parseAssignedUserId(value) {
-        const raw = String(value ?? '').trim();
-        if (!raw) return '';
+        let node =
+            anchor;
 
-        // Modulr peut renvoyer l'identifiant sous plusieurs formes selon le widget
-        // (36, user:36, UserData:36, valeur sérialisée, etc.).
-        const numericTokens = raw.match(/\d+/g) || [];
-        const unique = Array.from(new Set(numericTokens.filter(token => /^[1-9]\d*$/.test(token))));
-        return unique.length === 1 ? unique[0] : '';
-    }
+        let depth =
+            0;
 
-    function identifyUserText(text) {
-        const normalized = normalizeText(text);
-        const ids = new Set();
-        for (const user of USER_TEXT_MAPPING) {
-            if (user.patterns.some(pattern => {
-                const needle = normalizeText(pattern);
-                const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                return new RegExp('(^|[^a-z0-9])' + escaped + '($|[^a-z0-9])').test(normalized);
-            })) ids.add(user.id);
-        }
-        return ids.size === 1 ? Array.from(ids)[0] : '';
-    }
+        while (
+            node &&
+            depth < 12
+        ) {
+            const text =
+                normalizeText(
+                    node.textContent || ''
+                );
 
-    function roleResult(state, userId = '', source = '') {
-        return { state, userId, source };
-    }
+            const hasReferentField =
+                Boolean(
+                    node.querySelector?.(
+                        '[name="estimate[referent_user_id]"], [name="referent_user_id"], [name*="referent_user_id"]'
+                    )
+                );
 
-    function readRoleControl(field, role) {
-        const source = `${role} champ ${field.name || field.id || field.tagName}`;
-        if (field.matches('select')) {
-            if (field.multiple || field.getAttribute('aria-busy') === 'true' ||
-                field.matches('[data-loading="true"], .loading') ||
-                !field.options.length) return roleResult('unknown', '', source + ' en chargement');
-            // Only the selected option/value; never scan all available collaborators.
-            const selected = field.selectedOptions[0];
-            if (!selected) return roleResult('unknown', '', source);
-            const value = String(field.value || '').trim();
-            const id = parseAssignedUserId(value);
-            if (id) return roleResult('assigned', id, source);
-            if (value && value !== '0') {
-                const textId = identifyUserText(selected.textContent);
-                return roleResult(textId ? 'assigned' : 'unknown', textId, source);
+            if (
+                hasReferentField ||
+                text.includes(
+                    'referent'
+                )
+            ) {
+                return node;
             }
-            const placeholder = normalizeText(selected.textContent);
-            if (/charg|loading/.test(placeholder)) return roleResult('unknown', '', source);
-            // A placeholder-only list can still be waiting for its options.
-            if (field.options.length === 1 && !/aucun|non renseigne|sans referent|sans binome/.test(placeholder))
-                return roleResult('unknown', '', source);
-            return roleResult('empty', '', source);
-        }
-        const rawValues = [
-            field.value,
-            field.getAttribute('data-' + role + '-user-id'),
-            field.getAttribute('data-user-id'),
-            field.getAttribute('data-value'),
-            field.getAttribute('data-id')
-        ].filter(value => value !== null && value !== undefined);
 
-        for (const value of rawValues) {
-            const id = parseAssignedUserId(value);
-            if (id) return roleResult('assigned', id, source);
+            node =
+                node.parentElement;
+
+            depth++;
         }
 
-        // Select2 / widgets Modulr : la vraie valeur peut être affichée à côté du champ
-        // alors que l'input technique reste vide.
-        const widgetCandidates = [];
-        if (field.id) {
-            const escapedId = CSS.escape(field.id);
-            widgetCandidates.push(
-                field.ownerDocument?.querySelector('#s2id_' + escapedId),
-                field.ownerDocument?.querySelector('#' + escapedId + '_chosen')
-            );
-        }
-        widgetCandidates.push(field.nextElementSibling, field.parentElement?.querySelector('.select2-chosen, .select2-selection__rendered'));
+        return (
+            anchor.closest(
+                'tr, li, .card, .panel, .box, .well, [class*="estimate"], [id*="estimate"], [class*="devis"], [id*="devis"]'
+            )
 
-        for (const widget of widgetCandidates.filter(Boolean)) {
-            const id = identifyUserText(
-                (widget.textContent || '') + ' ' +
-                (widget.getAttribute?.('title') || '') + ' ' +
-                (widget.getAttribute?.('data-original-title') || '')
-            );
-            if (id) return roleResult('assigned', id, source + ' via widget');
-        }
+            ||
 
-        const hasExplicitEmpty = rawValues.some(value => String(value).trim() === '' || String(value).trim() === '0');
-        if (hasExplicitEmpty) return roleResult('empty', '', source);
-        return roleResult('unknown', '', source);
+            anchor.parentElement
+
+            ||
+
+            anchor
+        );
     }
 
-    function mergeRoleResults(results, role) {
-        if (!results.length) return roleResult('unknown', '', role + ' non lisible');
-        const ids = new Set(results.filter(r => r.state === 'assigned').map(r => r.userId));
-        if (ids.size > 1 || results.some(r => r.state === 'unknown'))
-            return roleResult('unknown', '', role + ' ambigu ou en chargement');
-        if (ids.size === 1) return results.find(r => r.state === 'assigned');
-        return roleResult('empty', '', role + ' explicitement vide');
-    }
+    function extractUserIdNearRoleDetailed(
+        root,
+        rolePatterns,
+        sourceLabel
+    ) {
+        if (!root) {
+            return {
+                userId: '',
+                source: 'conteneur absent'
+            };
+        }
 
-    function readRoleDetailed(root, role, clientOnly = false) {
-        if (!root) return roleResult('unknown', '', role + ' conteneur absent');
-        const isForeign = element => {
-            if (!clientOnly) return false;
-            return Boolean(element.closest('[id*="element_toggle_estimate_"], [data-estimate-id], ' +
-                '[class*="estimate"], [id*="estimate"], .task, [class*="task"], [id*="task"]')) ||
-                /estimate\[/.test(element.name || '');
+        const normalizedRoles =
+            rolePatterns.map(
+                role =>
+                    normalizeText(
+                        role
+                    )
+            );
+
+        const elements =
+            Array.from(
+                root.querySelectorAll(
+                    'label, th, td, p, li, span, strong, b, div'
+                )
+            )
+                .filter(
+                    element => {
+                        const text =
+                            normalizeText(
+                                element.textContent || ''
+                            );
+
+                        return normalizedRoles.some(
+                            role =>
+                                text.includes(
+                                    role
+                                )
+                        );
+                    }
+                )
+                .sort(
+                    (a, b) =>
+                        normalizeText(
+                            a.textContent || ''
+                        ).length
+                        -
+                        normalizeText(
+                            b.textContent || ''
+                        ).length
+                );
+
+        for (const element of elements) {
+            const contexts = [
+                element,
+                element.nextElementSibling,
+                element.parentElement,
+                element.closest(
+                    'tr, p, li, .form-group, .control-group, .row'
+                )
+            ].filter(Boolean);
+
+            for (const context of contexts) {
+                let text =
+                    normalizeText(
+                        context.textContent || ''
+                    );
+
+                context
+                    .querySelectorAll?.(
+                        '[title], [aria-label], [data-original-title], [data-title]'
+                    )
+                    .forEach(
+                        el => {
+                            text +=
+                                ' '
+                                +
+                                normalizeText(
+                                    el.getAttribute('title')
+                                    ||
+                                    el.getAttribute('aria-label')
+                                    ||
+                                    el.getAttribute('data-original-title')
+                                    ||
+                                    el.getAttribute('data-title')
+                                    ||
+                                    ''
+                                );
+                        }
+                    );
+
+                for (const user of USER_TEXT_MAPPING) {
+                    for (const pattern of user.patterns) {
+                        if (
+                            text.includes(
+                                normalizeText(
+                                    pattern
+                                )
+                            )
+                        ) {
+                            return {
+                                userId:
+                                    user.id,
+
+                                source:
+                                    `${sourceLabel} près du libellé (${pattern})`
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        return {
+            userId: '',
+            source:
+                `${sourceLabel} introuvable près de son libellé`
         };
-        const controls = Array.from(root.querySelectorAll('input[name], select[name], textarea[name], [data-' + role + '-user-id]'))
-            .filter(el => {
-                if (isForeign(el)) return false;
-                const name = normalizeText(el.name || '');
-                const strictMatch = new RegExp('(?:^|\\[|_)' + role + '(?:_user)?_id(?:\\]|$)').test(el.name || '');
-                // Compatibilité avec les champs réellement utilisés par Modulr avant la 11.2.3 :
-                // certains noms ne finissent pas exactement par *_user_id mais contiennent bien role + user.
-                const legacyMatch = name.includes(role) && name.includes('user');
-                return strictMatch || legacyMatch || el.hasAttribute('data-' + role + '-user-id');
-            });
-        if (controls.length) return mergeRoleResults(controls.map(el => readRoleControl(el, role)), role);
-        const labels = Array.from(root.querySelectorAll('label, th, td, dt, p, li, span, strong, b, div'))
-            .filter(el => !isForeign(el) && !el.closest('select, option, .task, [class*="task"], [id*="task"]') &&
-                new RegExp('^' + role + '(?:\\s+(?:du devis|client))?\\s*(?::.*)?$').test(normalizeText(el.textContent)));
-        const results = [];
-        for (const label of labels) {
-            const inline = normalizeText(label.textContent).match(new RegExp('^' + role + '(?:\\s+(?:du devis|client))?\\s*:\\s*(.+)$'));
-            if (inline) {
-                const inlineControl = label.querySelector('select, input');
-                if (inlineControl) { results.push(readRoleControl(inlineControl, role)); continue; }
-                // Do not treat a parent containing both roles as a role-value pair.
-                if (/\\b(?:referent|binome)\\b/.test(inline[1])) continue;
-                const id = identifyUserText(inline[1]);
-                if (id) results.push(roleResult('assigned', id, role + ' valeur après libellé'));
-                else if (/^(?:-|—|aucun(?:e)?|non renseigne)$/.test(inline[1]))
-                    results.push(roleResult('empty', '', role + ' explicitement vide'));
-                else results.push(roleResult('unknown', '', role + ' valeur ambiguë'));
-                continue;
-            }
-            const linked = label.htmlFor && root.querySelector('#' + CSS.escape(label.htmlFor));
-            if (linked) { results.push(readRoleControl(linked, role)); continue; }
-            const value = label.nextElementSibling;
-            if (!value || isForeign(value)) continue;
-            const control = value.matches('select, input') ? value : value.querySelector('select, input');
-            if (control) { results.push(readRoleControl(control, role)); continue; }
-            const clone = value.cloneNode(true);
-            clone.querySelectorAll('select, option, script, style, .task, [class*="task"]').forEach(el => el.remove());
-            let text = clone.textContent || '';
-            clone.querySelectorAll('[title], [aria-label], [data-original-title], [data-title]').forEach(el => {
-                text += ' ' + (el.getAttribute('title') || el.getAttribute('aria-label') ||
-                    el.getAttribute('data-original-title') || el.getAttribute('data-title') || '');
-            });
-            text += ' ' + (value.getAttribute('title') || value.getAttribute('aria-label') || '');
-            const id = identifyUserText(text);
-            if (id) results.push(roleResult('assigned', id, role + ' valeur liée au libellé'));
-            else if (/^(?:-|—|aucun(?:e)?|non renseigne|sans referent|sans binome)\s*$/.test(normalizeText(text)))
-                results.push(roleResult('empty', '', role + ' explicitement vide'));
-            else results.push(roleResult('unknown', '', role + ' valeur ambiguë'));
+    }
+
+    function extractUserIdFromElementDetailed(
+        root
+    ) {
+        if (
+            !root
+        ) {
+            return {
+                userId: '',
+                source: 'conteneur absent'
+            };
         }
-        return mergeRoleResults(results, role);
+
+        const fieldSelectors = [
+            '[name="estimate[referent_user_id]"]',
+            '[name="referent_user_id"]',
+            '[name*="referent_user_id"]',
+            '[name*="referent"][name*="user"]',
+            '[data-referent-user-id]'
+        ];
+
+        for (
+            const selector
+            of fieldSelectors
+        ) {
+            for (
+                const element
+                of root.querySelectorAll(
+                    selector
+                )
+            ) {
+                const values = [
+                    element.value,
+                    element.getAttribute(
+                        'data-referent-user-id'
+                    )
+                ];
+
+                for (
+                    const value
+                    of values
+                ) {
+                    const userId =
+                        normalizeUserId(
+                            value
+                        );
+
+                    if (
+                        userId
+                    ) {
+                        return {
+                            userId,
+
+                            source:
+                                `conteneur devis ${selector}`
+                        };
+                    }
+                }
+            }
+        }
+
+        return extractUserIdNearRoleDetailed(
+            root,
+            ['référent', 'referent'],
+            'référent'
+        );
     }
 
-    function extractUserIdNearRoleDetailed(root, rolePatterns, sourceLabel) {
-        return readRoleDetailed(root, normalizeText(sourceLabel));
-    }
+    function extractBinomeUserIdFromElementDetailed(
+        root
+    ) {
+        if (
+            !root
+        ) {
+            return {
+                userId: '',
+                source: 'conteneur absent'
+            };
+        }
 
-    function extractUserIdFromElementDetailed(root) {
-        return readRoleDetailed(root, 'referent');
-    }
+        const fieldSelectors = [
+            '[name="estimate[binome_user_id]"]',
+            '[name="binome_user_id"]',
+            '[name*="binome_user_id"]',
+            '[name*="binome"][name*="user"]',
+            '[data-binome-user-id]'
+        ];
 
-    function extractBinomeUserIdFromElementDetailed(root) {
-        return readRoleDetailed(root, 'binome');
+        for (
+            const selector
+            of fieldSelectors
+        ) {
+            for (
+                const element
+                of root.querySelectorAll(
+                    selector
+                )
+            ) {
+                const values = [
+                    element.value,
+                    element.getAttribute(
+                        'data-binome-user-id'
+                    )
+                ];
+
+                for (
+                    const value
+                    of values
+                ) {
+                    const userId =
+                        normalizeUserId(
+                            value
+                        );
+
+                    if (
+                        userId
+                    ) {
+                        return {
+                            userId,
+
+                            source:
+                                `conteneur devis ${selector}`
+                        };
+                    }
+                }
+            }
+        }
+
+        return extractUserIdNearRoleDetailed(
+            root,
+            ['binôme', 'binome'],
+            'binôme'
+        );
     }
 
     function getReferentUserIdFromEstimateRootDetailed(
@@ -1230,8 +1396,7 @@
     }
 
     async function fetchFreshPage(
-        urlValue,
-        signal
+        urlValue
     ) {
         const response =
             await fetch(
@@ -1246,9 +1411,7 @@
                         'same-origin',
 
                     redirect:
-                        'follow',
-
-                    signal
+                        'follow'
                 }
             );
 
@@ -1771,8 +1934,7 @@
     async function resolveNewEstimateContext({
         idsBefore,
         nativeResult,
-        referentFromForm,
-        form
+        referentFromForm
     }) {
         section(
             'IDENTIFICATION DU NOUVEAU DEVIS'
@@ -1842,7 +2004,7 @@
         });
 
         let estimateId =
-            idsBefore.has(finalUrlEstimateId) ? '' : finalUrlEstimateId;
+            finalUrlEstimateId;
 
         let estimateIdSource =
             estimateId
@@ -1872,13 +2034,132 @@
             `✅ Nouveau devis identifié : ${estimateId} (${estimateIdSource})`
         );
 
-        const responseDoc = new DOMParser().parseFromString(nativeResult.html || '', 'text/html');
-        const referent = await resolveEstimateAssignment({
-            estimateId,
-            pageUrl: nativeResult.finalUrl,
-            responseDoc,
-            form
-        });
+        let referent =
+            referentFromForm;
+
+        if (
+            referent.userId
+        ) {
+            log(
+                `✅ Référent déjà trouvé dans le formulaire : user:${referent.userId} (${referent.source})`
+            );
+
+        } else {
+            const responseDoc =
+                new DOMParser()
+                    .parseFromString(
+                        nativeResult.html
+                        ||
+                        '',
+
+                        'text/html'
+                    );
+
+            referent =
+                getReferentUserIdFromEstimateRootDetailed(
+                    responseDoc,
+                    estimateId
+                );
+        }
+
+        if (
+            !referent.userId
+        ) {
+            warn(
+                '⚠️ Référent absent de la réponse. Vérification ciblée de la fiche client.'
+            );
+
+            const freshPage =
+                await fetchFreshPage(
+                    nativeResult.finalUrl
+                );
+
+            referent =
+                getReferentUserIdFromEstimateRootDetailed(
+                    freshPage.doc,
+                    estimateId
+                );
+        }
+
+        if (
+            !referent.userId
+        ) {
+            const responseDoc =
+                new DOMParser()
+                    .parseFromString(
+                        nativeResult.html
+                        ||
+                        '',
+
+                        'text/html'
+                    );
+
+            let binome =
+                getBinomeUserIdFromEstimateRootDetailed(
+                    responseDoc,
+                    estimateId
+                );
+
+            if (
+                !binome.userId
+            ) {
+                try {
+                    const freshPage =
+                        await fetchFreshPage(
+                            nativeResult.finalUrl
+                        );
+
+                    binome =
+                        getBinomeUserIdFromEstimateRootDetailed(
+                            freshPage.doc,
+                            estimateId
+                        );
+
+                } catch (
+                    err
+                ) {
+                    warn(
+                        '⚠️ Vérification ciblée du binôme impossible :',
+                        err
+                    );
+                }
+            }
+
+            if (
+                binome.userId
+            ) {
+                referent = {
+                    userId:
+                        binome.userId,
+
+                    source:
+                        `fallback binôme → ${binome.source}`
+                };
+
+                log(
+                    `✅ Référent introuvable. Fallback binôme : user:${binome.userId} (${binome.source})`
+                );
+
+            } else {
+                const activeUser =
+                    getActiveUserInfo();
+
+                if (
+                    !activeUser.userId
+                ) {
+                    throw new Error(
+                        'Référent et binôme introuvables et utilisateur connecté non identifiable.'
+                    );
+                }
+
+                referent =
+                    activeUser;
+
+                warn(
+                    `⚠️ Référent et binôme introuvables. Fallback final vers l’utilisateur connecté : ${activeUser.displayName} (user:${activeUser.userId}).`
+                );
+            }
+        }
 
         return {
             estimateId,
@@ -2170,136 +2451,192 @@
         };
     }
 
-    function readAssignmentSnapshot(root, estimateId, form = null) {
-        const container = findEstimateContainerInRoot(root, estimateId);
-        function read(role) {
-            const formResult = form && readRoleDetailed(form, role);
-            // A present form control has priority, including empty / loading values.
-            if (formResult && (formResult.state !== 'unknown' ||
-                formResult.source !== role + ' non lisible')) return formResult;
-            const estimateResult = readRoleDetailed(container, role);
-            if (estimateResult.state !== 'unknown' || (container &&
-                estimateResult.source !== role + ' non lisible')) return estimateResult;
-            // Only dedicated client fields / role-value pairs, never arbitrary page text.
-            return readRoleDetailed(root, role, true);
-        }
-        return { referent: read('referent'), binome: read('binome') };
-    }
-
-    function chooseAssignment(snapshot, allowConnected = false) {
-        const { referent, binome } = snapshot;
-        if (referent.state === 'assigned') return referent;
-        if (referent.state !== 'empty') return null;
-        if (binome.state === 'assigned') return { ...binome, source: 'fallback binôme → ' + binome.source };
-        if (binome.state !== 'empty' || !allowConnected) return null;
-        const active = getActiveUserInfo();
-        if (!active.userId) throw new Error('Utilisateur connecté non identifiable.');
-        return { ...active, source: 'Référent et binôme explicitement vides → ' + active.source };
-    }
-
-    async function resolveEstimateAssignment({ estimateId, form = null,
-        pageUrl = window.location.href, responseDoc = null, timeoutMs = 6000 }) {
-        const deadline = Date.now() + timeoutMs;
-        let freshDoc = responseDoc;
-        let snapshot;
-
-        async function refresh() {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(3000, deadline - Date.now())));
-            try { return (await fetchFreshPage(pageUrl, controller.signal)).doc; }
-            finally { clearTimeout(timer); }
-        }
-
-        // 11.2.6 : retour au comportement qui fonctionnait en 11.2.2.
-        // On cherche d'abord une valeur réellement sélectionnée dans le formulaire / devis,
-        // puis dans une fiche fraîche. On ne bloque plus 6 s uniquement parce qu'un autre
-        // rôle est "unknown" alors que le référent sélectionné est déjà lisible.
-        while (Date.now() < deadline) {
-            snapshot = readAssignmentSnapshot(document, estimateId, form);
-
-            if (snapshot.referent.state === 'assigned') {
-                log('Référent trouvé directement :', snapshot.referent);
-                return snapshot.referent;
-            }
-
-            // Si le référent est explicitement vide, le binôme peut être utilisé immédiatement.
-            if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'assigned') {
-                const chosen = { ...snapshot.binome, source: 'fallback binôme → ' + snapshot.binome.source };
-                log('Référent vide, binôme trouvé :', chosen);
-                return chosen;
-            }
-
-            if (!freshDoc) {
-                try { freshDoc = await refresh(); }
-                catch (err) { warn('Vérification ciblée de la fiche indisponible :', err); }
-            }
-
-            if (freshDoc) {
-                const fresh = readAssignmentSnapshot(freshDoc, estimateId);
-
-                if (fresh.referent.state === 'assigned') {
-                    return { ...fresh.referent, source: 'vérification ciblée → ' + fresh.referent.source };
-                }
-
-                if (fresh.referent.state === 'empty' && fresh.binome.state === 'assigned') {
-                    return { ...fresh.binome, source: 'fallback binôme après vérification ciblée → ' + fresh.binome.source };
-                }
-
-                // Les 2 rôles ne doivent tomber sur l'utilisateur connecté que lorsqu'ils sont
-                // explicitement vides dans une source fiable.
-                if (fresh.referent.state === 'empty' && fresh.binome.state === 'empty') {
-                    return chooseAssignment(fresh, true);
-                }
-            }
-
-            // Même règle pour le formulaire live : fallback connecté seulement si les 2 sont vides.
-            if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'empty') {
-                return chooseAssignment(snapshot, true);
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 150));
-            freshDoc = null;
-        }
-
-        console.table(snapshot);
-        throw new Error('Référent ou binôme non lisible par le script malgré les données affichées dans Modulr.');
-    }
-
-    async function resolveExistingEstimateReferent(link, estimateId, clientId = '') {
-        // Sur la fiche client, les détails du devis sont chargés en AJAX.
-        // Le HTML initial ne contient donc ni Référent ni Binôme.
-        // On tente d'abord le DOM live, puis on lit directement la page de modification du devis.
-        try {
-            return await resolveEstimateAssignment({ estimateId, timeoutMs: 1200 });
-        } catch (liveError) {
-            warn('Assignation absente du HTML initial / détails AJAX non chargés :', liveError);
-        }
-
-        const editUrl = new URL('/fr/scripts/estimates/estimates_manage.php', window.location.origin);
-        if (clientId) editUrl.searchParams.set('client_id', clientId);
-        editUrl.searchParams.set('estimate_id', estimateId);
-
-        const freshEdit = await fetchFreshPage(editUrl.href);
-        const editForm =
-            freshEdit.doc.querySelector('form[action*="estimates"], form') ||
-            null;
-
-        // La page de modification est la source fiable : elle contient les valeurs enregistrées.
-        const snapshot = readAssignmentSnapshot(freshEdit.doc, estimateId, editForm);
-        const chosen = chooseAssignment(snapshot);
-
-        if (chosen) {
-            return { ...chosen, source: 'page modification devis → ' + chosen.source };
-        }
-
-        if (snapshot.referent.state === 'empty' && snapshot.binome.state === 'empty') {
-            return chooseAssignment(snapshot, true);
-        }
-
-        console.table(snapshot);
-        throw new Error(
-            'Référent/binôme absents du HTML initial et non lisibles sur la page de modification du devis.'
+    async function resolveExistingEstimateReferent(
+        link,
+        estimateId
+    ) {
+        section(
+            'RECHERCHE DE L’ASSIGNÉ DU DEVIS EXISTANT'
         );
+
+        const url =
+            new URL(
+                link.href,
+                window.location.origin
+            );
+
+        const urlCandidates = [
+            {
+                source:
+                    'URL / referent_user_id',
+
+                value:
+                    url.searchParams
+                        .get(
+                            'referent_user_id'
+                        )
+            },
+
+            {
+                source:
+                    'URL / referent_id',
+
+                value:
+                    url.searchParams
+                        .get(
+                            'referent_id'
+                        )
+            }
+        ];
+
+        for (
+            const candidate
+            of urlCandidates
+        ) {
+            const userId =
+                normalizeUserId(
+                    candidate.value
+                );
+
+            if (
+                userId
+            ) {
+                log(
+                    `✅ Référent trouvé directement : user:${userId} (${candidate.source})`
+                );
+
+                return {
+                    userId,
+
+                    source:
+                        candidate.source
+                };
+            }
+        }
+
+        const directReferent =
+            getReferentUserIdFromEstimateRootDetailed(
+                document,
+                estimateId
+            );
+
+        if (
+            directReferent.userId
+        ) {
+            log(
+                `✅ Référent trouvé dans le devis ${estimateId} : user:${directReferent.userId} (${directReferent.source})`
+            );
+
+            return directReferent;
+        }
+
+        warn(
+            `⚠️ Référent non trouvé immédiatement pour le devis ${estimateId}. Vérification ciblée de la fiche client.`
+        );
+
+        let freshPage = null;
+
+        try {
+            freshPage =
+                await fetchFreshPage(
+                    window.location.href
+                );
+
+            const freshReferent =
+                getReferentUserIdFromEstimateRootDetailed(
+                    freshPage.doc,
+                    estimateId
+                );
+
+            if (
+                freshReferent.userId
+            ) {
+                log(
+                    `✅ Référent trouvé après vérification ciblée : user:${freshReferent.userId} (${freshReferent.source})`
+                );
+
+                return {
+                    userId:
+                        freshReferent.userId,
+
+                    source:
+                        `vérification ciblée → ${freshReferent.source}`
+                };
+            }
+
+        } catch (
+            err
+        ) {
+            warn(
+                '⚠️ Vérification ciblée du référent impossible :',
+                err
+            );
+        }
+
+        const directBinome =
+            getBinomeUserIdFromEstimateRootDetailed(
+                document,
+                estimateId
+            );
+
+        if (
+            directBinome.userId
+        ) {
+            log(
+                `✅ Aucun référent trouvé. Fallback binôme : user:${directBinome.userId} (${directBinome.source})`
+            );
+
+            return {
+                userId:
+                    directBinome.userId,
+
+                source:
+                    `fallback binôme → ${directBinome.source}`
+            };
+        }
+
+        if (
+            freshPage
+        ) {
+            const freshBinome =
+                getBinomeUserIdFromEstimateRootDetailed(
+                    freshPage.doc,
+                    estimateId
+                );
+
+            if (
+                freshBinome.userId
+            ) {
+                log(
+                    `✅ Aucun référent trouvé. Fallback binôme après vérification ciblée : user:${freshBinome.userId} (${freshBinome.source})`
+                );
+
+                return {
+                    userId:
+                        freshBinome.userId,
+
+                    source:
+                        `fallback binôme après vérification ciblée → ${freshBinome.source}`
+                };
+            }
+        }
+
+        const activeUser =
+            getActiveUserInfo();
+
+        if (
+            !activeUser.userId
+        ) {
+            throw new Error(
+                `Référent et binôme du devis ${estimateId} introuvables et utilisateur connecté non identifiable.`
+            );
+        }
+
+        warn(
+            `⚠️ Référent et binôme réellement introuvables. Fallback final vers ${activeUser.displayName} (user:${activeUser.userId}).`
+        );
+
+        return activeUser;
     }
 
     async function handleEstimateStatusUpdate(
@@ -2345,23 +2682,6 @@
                 statusKey
             ]
         ) {
-            return;
-        }
-
-        const earlyEstimateId = getEstimateIdFromForm(form);
-        if (!earlyEstimateId) {
-            // CRITIQUE : pour une création, on ne bloque plus JAMAIS le submit Modulr.
-            // On mémorise seulement le contexte, puis on laisse le navigateur faire son enregistrement natif.
-            const earlyClientInfo = getClientIdFromFormDetailed(form);
-            const earlyReferent = getReferentUserIdFromFormDetailed(form);
-            if (earlyClientInfo.clientId) {
-                rememberPendingNewEstimate({
-                    form,
-                    statusKey,
-                    clientInfo: earlyClientInfo,
-                    referentFromForm: earlyReferent
-                });
-            }
             return;
         }
 
@@ -2506,8 +2826,7 @@
             const referent =
                 await resolveExistingEstimateReferent(
                     link,
-                    estimateId,
-                    clientId
+                    estimateId
                 );
 
             if (
@@ -2585,100 +2904,14 @@
             isProcessing =
                 false;
 
-            const reason = err instanceof Error ? err.message : String(err);
             alert(
                 "La tâche automatique n'a pas pu être créée correctement.\n\n"
                 +
-                "Cause : " + reason + "\n\n"
+                "Le changement d'état n'a pas été lancé afin d'éviter une incohérence.\n\n"
                 +
-                "Le changement d'état n'a pas été lancé afin d'éviter une incohérence."
+                'Merci de vérifier dans Modulr avant de refaire l’action.'
             );
         }
-    }
-
-
-    function rememberPendingNewEstimate({ form, statusKey, clientInfo, referentFromForm }) {
-        const active = getActiveUserInfo();
-        const userId = referentFromForm.userId || active.userId || '';
-        const source = referentFromForm.userId
-            ? referentFromForm.source
-            : 'nouveau devis sans référent sélectionné → utilisateur connecté';
-
-        const payload = {
-            createdAt: Date.now(),
-            clientId: clientInfo.clientId,
-            statusKey,
-            userId,
-            referentSource: source,
-            idsBefore: Array.from(collectEstimateIdsFromRoot(document))
-        };
-
-        try {
-            sessionStorage.setItem(PENDING_NEW_ESTIMATE_KEY, JSON.stringify(payload));
-            log('Nouveau devis laissé à Modulr en natif ; tâche mémorisée pour après enregistrement :', payload);
-        } catch (err) {
-            warn('Impossible de mémoriser la tâche différée du nouveau devis :', err);
-        }
-    }
-
-    async function processPendingNewEstimate() {
-        let pending;
-        try {
-            pending = JSON.parse(sessionStorage.getItem(PENDING_NEW_ESTIMATE_KEY) || 'null');
-        } catch (_) {
-            sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
-            return;
-        }
-        if (!pending) return;
-
-        // Ne jamais garder un ancien contexte.
-        if (!pending.createdAt || Date.now() - pending.createdAt > 5 * 60 * 1000) {
-            sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
-            return;
-        }
-
-        // Attendre que Modulr ait réellement rendu la page suivante.
-        for (let attempt = 0; attempt < 12; attempt++) {
-            const directId =
-                normalizeEstimateId(getParamFromUrl(window.location.href, 'estimate_id')) ||
-                normalizeEstimateId(getParamFromUrl(window.location.href, 'id_estimate'));
-
-            const idsAfter = Array.from(collectEstimateIdsFromRoot(document));
-            const before = new Set((pending.idsBefore || []).map(String));
-            const newIds = idsAfter.filter(id => !before.has(String(id)));
-            const estimateId = directId || (newIds.length === 1 ? newIds[0] : '');
-
-            if (estimateId) {
-                try {
-                    await createTask(
-                        {
-                            statusKey: pending.statusKey,
-                            clientId: pending.clientId,
-                            clientSource: 'nouveau devis enregistré nativement par Modulr',
-                            userId: pending.userId,
-                            referentSource: pending.referentSource,
-                            estimateIdSource: directId
-                                ? 'URL après enregistrement natif'
-                                : 'nouvel ID détecté après enregistrement natif'
-                        },
-                        estimateId
-                    );
-                    sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
-                    log('✅ Tâche créée après enregistrement natif du nouveau devis :', estimateId);
-                    return;
-                } catch (err) {
-                    error('Création différée de tâche impossible après enregistrement natif :', err);
-                    // Le devis est déjà enregistré : ne jamais bloquer l'utilisateur.
-                    sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
-                    return;
-                }
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        warn('Nouveau devis enregistré mais ID non retrouvé pour la tâche automatique. Aucun blocage utilisateur.');
-        sessionStorage.removeItem(PENDING_NEW_ESTIMATE_KEY);
     }
 
     async function handleEstimateFormSubmit(
@@ -2779,9 +3012,6 @@
                 referentFromForm.source
         });
 
-        let stage = 'lecture du client';
-        let saveAttempted = false;
-        let taskAttempted = false;
         try {
             if (
                 !clientInfo.clientId
@@ -2794,14 +3024,59 @@
             if (
                 initialEstimateId
             ) {
-                stage = 'lecture du référent et du binôme';
-                const referent = await resolveEstimateAssignment({
-                    estimateId: initialEstimateId,
-                    form
-                });
+                let referent =
+                    referentFromForm;
 
-                stage = 'création de la tâche';
-                taskAttempted = true;
+                if (
+                    !referent.userId
+                ) {
+                    referent =
+                        getReferentUserIdFromEstimateRootDetailed(
+                            document,
+                            initialEstimateId
+                        );
+                }
+
+                if (
+                    !referent.userId
+                ) {
+                    const binome =
+                        getBinomeUserIdFromEstimateRootDetailed(
+                            document,
+                            initialEstimateId
+                        );
+
+                    if (
+                        binome.userId
+                    ) {
+                        referent = {
+                            userId:
+                                binome.userId,
+
+                            source:
+                                `fallback binôme → ${binome.source}`
+                        };
+                    }
+                }
+
+                if (
+                    !referent.userId
+                ) {
+                    const activeUser =
+                        getActiveUserInfo();
+
+                    if (
+                        !activeUser.userId
+                    ) {
+                        throw new Error(
+                            'Référent et binôme du devis existant introuvables et utilisateur connecté non identifiable.'
+                        );
+                    }
+
+                    referent =
+                        activeUser;
+                }
+
                 await createTask(
                     {
                         statusKey,
@@ -2825,30 +3100,12 @@
                     initialEstimateId
                 );
 
-                stage = 'enregistrement du devis';
-                saveAttempted = true;
                 submitFormNatively(
                     form,
                     submitter
                 );
 
                 return;
-            }
-
-            // Nouveau devis : le formulaire Modulr expose directement
-            // estimate[referent_user_id], mais aucun champ binôme.
-            // Ne jamais bloquer l'enregistrement en attendant un binôme qui n'existe pas ici.
-            stage = 'lecture du référent avant enregistrement';
-            let newEstimateAssignee = referentFromForm;
-
-            if (!newEstimateAssignee.userId) {
-                const activeUser = getActiveUserInfo();
-                if (activeUser.userId) {
-                    newEstimateAssignee = {
-                        userId: activeUser.userId,
-                        source: 'nouveau devis sans référent sélectionné → utilisateur connecté'
-                    };
-                }
             }
 
             const idsBefore =
@@ -2896,8 +3153,6 @@
                 }
             );
 
-            stage = 'enregistrement du nouveau devis';
-            saveAttempted = true;
             const nativeResult =
                 await runNativeFormSubmitByFetch(
                     form,
@@ -2918,19 +3173,15 @@
                 }
             );
 
-            stage = 'identification du devis enregistré et confirmation du responsable';
             const context =
                 await resolveNewEstimateContext({
                     idsBefore,
 
                     nativeResult,
 
-                    referentFromForm: newEstimateAssignee,
-                    form
+                    referentFromForm
                 });
 
-            stage = 'création de la tâche';
-            taskAttempted = true;
             await createTask(
                 {
                     statusKey,
@@ -2968,23 +3219,11 @@
             isProcessing =
                 false;
 
-            const reason = err instanceof Error ? err.message : String(err);
-            error('Diagnostic formulaire :', { version: VERSION, stage,
-                saveAttempted, taskAttempted, estimateId: initialEstimateId || 'nouveau', reason });
-            // 11.2.8 : fail-open. L'automatisation ne doit jamais empêcher
-            // l'utilisateur d'enregistrer ou modifier un devis dans Modulr.
-            if (!saveAttempted) {
-                warn('Automatisation en échec avant sauvegarde : poursuite de l’enregistrement natif Modulr.');
-                try {
-                    submitFormNatively(form, submitter);
-                    return;
-                } catch (nativeErr) {
-                    error('Échec du fallback natif Modulr :', nativeErr);
-                }
-            }
-
-            alert(`Automatisation de tâche en échec à l’étape : ${stage}.\n\n${reason}\n\n` +
-                'Le devis reste prioritaire : vérifiez simplement si la tâche a bien été créée.');
+            alert(
+                "L'enregistrement du devis ou la création de la tâche automatique n'a pas pu être confirmé.\n\n"
+                +
+                'Merci de vérifier dans Modulr avant de refaire l’action, afin d’éviter une double tâche.'
+            );
         }
     }
 
@@ -3086,10 +3325,7 @@
 
     window.addEventListener(
         'load',
-        () => {
-            cleanOldDoneKeys();
-            processPendingNewEstimate();
-        }
+        cleanOldDoneKeys
     );
 
 })();
